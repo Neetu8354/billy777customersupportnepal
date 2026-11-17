@@ -44,5 +44,5 @@ export async function POST(req) {
 }
 
 function pub(u, online) {
-  return { id: u.id, mobile: u.mobile, username: u.username, display_name: u.display_name, online };
+  return { id: u.id, mobile: u.mobile, cc: u.cc, username: u.username, display_name: u.display_name, online };
 }

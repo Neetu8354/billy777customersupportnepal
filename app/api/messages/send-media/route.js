@@ -43,7 +43,7 @@ export async function POST(req) {
     is_delivered: adm ? 1 : 0,
   });
   m.is_delivered = adm ? 1 : 0;
-  emitToAdmins(u, "message", { userId: u.id, user: { id: u.id, mobile: u.mobile, username: u.username, display_name: u.display_name, online }, message: m });
+  emitToAdmins(u, "message", { userId: u.id, user: { id: u.id, mobile: u.mobile, cc: u.cc, username: u.username, display_name: u.display_name, online }, message: m });
   emit(userCh(u.id), "message", { message: m });
   if (adm) emit(userCh(u.id), "delivered", { ids: [m.id] });
   schedule(() => maybeAutoReply(u.id, m), 0);

@@ -34,6 +34,7 @@ export async function GET() {
       return {
         id: u.id,
         mobile: u.mobile,
+        cc: u.cc,
         username: u.username,
         display_name: u.display_name,
         blocked: !!u.blocked,

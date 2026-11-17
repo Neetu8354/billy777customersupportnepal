@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CALL_CSS, CallOverlay, useVoiceCall } from "@/components/CallUI";
-import { Tick, MsgText, StickerMsg, VoicePlayer, CallEventRow, EmojiGrid, StickerPicker, ImageViewer } from "@/components/ChatBits";
-import { api, fmtTime, fmtDay, fmtAgo, sfx, isSticker, callInfo, avatarFor, subscribePush } from "@/lib/client";
+import { Tick, MsgText, StickerMsg, VoicePlayer, CallEventRow, EmojiGrid, StickerPicker, ImageViewer, MediaComposer, useFileDrop, DropOverlay, splitMedia } from "@/components/ChatBits";
+import { api, fmtTime, fmtDay, fmtAgo, sfx, isSticker, callInfo, avatarFor, subscribePush, downloadContact } from "@/lib/client";
 
 const CSS = `
 * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; -webkit-tap-highlight-color:transparent; }
@@ -162,10 +162,21 @@ html, body { height:100%; overscroll-behavior:none; }
 .wa-ia-btn.emoji { color:#f39c12; }
 .wa-ia-btn.mic { color:#e74c3c; }
 .wa-ia-btn.attach { color:#3498db; }
+.wa-ia-btn.video { color:#9b59b6; }
 .wa-ia-btn.recording { background:#e74c3c; color:#fff; animation:waPulse 1s infinite; }
 @keyframes waPulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.08)} }
 .wa-rec-bar { position:fixed; bottom:76px; left:50%; transform:translateX(-50%); background:#e74c3c; color:#fff; padding:10px 20px; border-radius:24px; font-size:13px; font-weight:600; display:flex; align-items:center; gap:10px; z-index:100; }
 .wa-rec-bar .dot { width:10px; height:10px; background:#fff; border-radius:50%; animation:waPulse 1s infinite; }
+.wa-up-bar { position:fixed; bottom:76px; left:50%; transform:translateX(-50%); background:#c23a10; color:#fff; padding:10px 16px; border-radius:24px; font-size:12px; font-weight:600; z-index:100; min-width:220px; max-width:90%; }
+.wa-up-track { height:5px; background:rgba(255,255,255,0.25); border-radius:4px; margin-top:6px; overflow:hidden; }
+.wa-up-fill { height:100%; background:#ff5a2e; border-radius:4px; transition:width 0.15s linear; }
+
+/* save-contact modal */
+.sc-body { padding:16px 14px; display:flex; flex-direction:column; gap:10px; align-items:center; }
+.sc-av { width:72px; height:72px; border-radius:50%; object-fit:cover; background:#dfe5e8; }
+.sc-name { width:100%; padding:10px 12px; border:1px solid #ddd; border-radius:10px; font-size:14px; outline:none; }
+.sc-name:focus { border-color:#e13c0e; }
+.sc-num { width:100%; padding:10px 12px; border-radius:10px; background:#f4f6f7; color:#555; font-size:14px; }
 .wa-input-wrap { flex:1 1 auto; min-width:0; background:#fff; border-radius:22px; display:flex; align-items:flex-end; padding:3px 8px; border:1px solid #ddd; }
 .wa-input-wrap:focus-within { border-color:#ff5a2e; }
 .wa-input-wrap textarea { flex:1; border:none; outline:none; resize:none; padding:8px 4px; font-size:15px; font-family:inherit; background:transparent; color:#1a1a1a; max-height:100px; line-height:1.4; min-width:0; }
@@ -266,10 +277,10 @@ function AgentsPanel({ onClose }) {
       <div className="ag-panel" onClick={(e) => e.stopPropagation()}>
         <div className="ag-head"><strong>Agents</strong><button onClick={onClose}><i className="fas fa-times" /></button></div>
         <div className="ag-form">
-          <input placeholder="Name (e.g. NP Agent)" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+          <input placeholder="Name (e.g. PK Agent)" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
           <input placeholder="Username" value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} />
           <input placeholder="Password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
-          <input placeholder="Country codes e.g. 977" value={f.prefixes} onChange={(e) => setF({ ...f, prefixes: e.target.value })} />
+          <input placeholder="Country codes e.g. 92,977" value={f.prefixes} onChange={(e) => setF({ ...f, prefixes: e.target.value })} />
           <label className="ag-def"><input type="checkbox" checked={f.is_default} onChange={(e) => setF({ ...f, is_default: e.target.checked })} /> Default (catch-all)</label>
           {err && <div className="a-err">{err}</div>}
           <button className="ag-add" onClick={create}>Add agent</button>
@@ -311,12 +322,19 @@ function Console() {
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [stickerOpen, setStickerOpen] = useState(false);
   const [rec, setRec] = useState(null);
+  const [composer, setComposer] = useState(null); // {kind:'image'|'video', file}
+  const [mediaQueue, setMediaQueue] = useState([]); // [{kind, file}] pending composers
+  const [upload, setUpload] = useState(null); // {label, pct}
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [savingContact, setSavingContact] = useState(false);
 
   const selRef = useRef(null);
   selRef.current = sel;
   const mainRef = useRef(null);
   const taRef = useRef(null);
   const imgRef = useRef(null);
+  const vidRef = useRef(null);
   const typingTimer = useRef(null);
   const typingSent = useRef(0);
   const toastTimer = useRef(null);
@@ -495,14 +513,51 @@ function Console() {
     if (el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 100) + "px"; }
   };
 
-  const attachImage = async (file) => {
-    if (!file || !sel) return;
+  /* dropped/pasted/picked files — first opens the composer, rest queue up so
+     each gets its own caption; drops do nothing without an open conversation */
+  const onMediaFiles = useCallback((files) => {
+    if (!selRef.current) return;
+    const { items, error } = splitMedia(files);
+    if (error) showToast(error, "error");
+    if (!items.length) return;
+    if (composer) return setMediaQueue((q) => [...q, ...items]);
+    setComposer(items[0]);
+    setMediaQueue((q) => [...q, ...items.slice(1)]);
+  }, [showToast, composer]);
+
+  const { dragging, dropProps } = useFileDrop(onMediaFiles);
+
+  /* XHR upload so the progress bar can track it; reply_to rides along when set */
+  const uploadMedia = (kind, file, caption) => {
+    const uid = selRef.current;
+    if (!file || !uid) return;
+    setUpload({ label: kind === "audio" ? "Sending voice…" : "Uploading…", pct: 0 });
     const fd = new FormData();
-    fd.append("kind", "image");
+    fd.append("kind", kind);
     fd.append("file", file);
-    fd.append("userId", String(sel));
-    const r = await fetch("/api/admin/send-media", { method: "POST", body: fd }).then((x) => x.json()).catch(() => null);
-    if (!r?.success) showToast(r?.error || "Upload failed", "error");
+    fd.append("caption", caption || "");
+    fd.append("userId", String(uid));
+    if (replyTo) fd.append("reply_to", JSON.stringify(replyTo.id));
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/admin/send-media");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) setUpload((u) => u && { ...u, pct: Math.round((e.loaded / e.total) * 96) });
+    };
+    xhr.onload = () => {
+      try {
+        const d = JSON.parse(xhr.responseText);
+        if (d?.success) {
+          setReplyTo(null);
+          sfx.msgOut();
+          setTimeout(() => { const el = mainRef.current; if (el) el.scrollTop = el.scrollHeight; }, 40);
+        } else showToast(d?.error || "Upload failed", "error");
+      } catch {
+        showToast("Upload failed", "error");
+      }
+      setTimeout(() => setUpload(null), 300);
+    };
+    xhr.onerror = () => { setUpload(null); showToast("Upload failed", "error"); };
+    xhr.send(fd);
   };
 
   const sendSticker = async (kind, value) => {
@@ -531,13 +586,9 @@ function Console() {
       stream.getTracks().forEach((t) => t.stop());
       recRef.current = null;
       setRec(null);
-      if ((Date.now() - started) / 1000 < 1 || !sel) return;
+      if ((Date.now() - started) / 1000 < 1 || !selRef.current) return;
       const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
-      const fd = new FormData();
-      fd.append("kind", "audio");
-      fd.append("file", new File([blob], "voice.webm", { type: blob.type }));
-      fd.append("userId", String(sel));
-      await fetch("/api/admin/send-media", { method: "POST", body: fd }).catch(() => {});
+      uploadMedia("audio", new File([blob], "voice.webm", { type: blob.type }), "");
     };
     recRef.current = { mr, chunks };
     mr.start();
@@ -555,6 +606,24 @@ function Console() {
     if (!u) return;
     const r = await api("/api/admin/block", { method: "POST", body: { userId: sel, blocked: !u.blocked } });
     if (r.data?.success) setUsers((us) => us.map((x) => (x.id === sel ? { ...x, blocked: !u.blocked } : x)));
+  };
+
+  const saveContact = async () => {
+    const name = saveName.trim();
+    if (!name || !selUser || savingContact) return;
+    setSavingContact(true);
+    const r = await api("/api/admin/save-contact", { method: "POST", body: { userId: sel, name } });
+    setSavingContact(false);
+    if (r.data?.success) {
+      setUsers((us) => us.map((u) => (u.id === sel ? { ...u, display_name: r.data.user.display_name } : u)));
+      downloadContact({
+        name: r.data.user.display_name,
+        phone: `+${selUser.cc || "977"}${selUser.mobile}`,
+        avatarSrc: avatarFor(selUser.username),
+      });
+      showToast("Contact saved — .vcf downloaded", "success");
+      setSaveOpen(false);
+    } else showToast(r.data?.error || "Save failed", "error");
   };
 
   const logout = async () => {
@@ -693,7 +762,8 @@ function Console() {
               Select a customer to open their chat
             </div>
           ) : (
-            <div className="chat-root">
+            <div className="chat-root" {...dropProps}>
+              {dragging && <DropOverlay />}
               <header className="wa-header">
                 <button className="a-back2" onClick={() => { setMobileOpen(false); setSel(null); }} aria-label="Back to customers" title="Back to customers">
                   <i className="fas fa-arrow-left" />
@@ -717,6 +787,13 @@ function Console() {
                   )}
                 </div>
                 <div className="wa-actions">
+                  <button
+                    className="wa-logout"
+                    title="Save contact"
+                    onClick={() => { setSaveName(selUser?.display_name || ""); setSaveOpen(true); }}
+                  >
+                    <i className="fas fa-user-plus" /> Save
+                  </button>
                   <button
                     className={`wa-logout ${selUser?.blocked ? "" : ""}`}
                     style={selUser?.blocked ? { background: "#e74c3c" } : undefined}
@@ -778,6 +855,9 @@ function Console() {
                   <button className="wa-ia-btn attach" title="Photo" onClick={() => imgRef.current?.click()}>
                     <i className="fas fa-paperclip" />
                   </button>
+                  <button className="wa-ia-btn video" title="Video" onClick={() => vidRef.current?.click()}>
+                    <i className="fas fa-video" />
+                  </button>
                 </div>
                 <div className="wa-input-wrap">
                   <textarea
@@ -785,6 +865,10 @@ function Console() {
                     rows={1}
                     value={text}
                     onChange={(e) => onType(e.target.value)}
+                    onPaste={(e) => {
+                      const files = e.clipboardData?.files;
+                      if (files?.length) { e.preventDefault(); onMediaFiles(files); }
+                    }}
                     placeholder="Type a reply..."
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -796,7 +880,16 @@ function Console() {
                   <i className={`fas ${sending ? "fa-spinner fa-spin" : "fa-paper-plane"}`} />
                 </button>
               </div>
-              <input ref={imgRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) attachImage(f); }} />
+              {upload && (
+                <div className="wa-up-bar">
+                  {upload.label} {upload.pct}%
+                  <div className="wa-up-track">
+                    <div className="wa-up-fill" style={{ width: `${upload.pct}%` }} />
+                  </div>
+                </div>
+              )}
+              <input ref={imgRef} type="file" accept="image/*" hidden onChange={(e) => { const files = e.target.files; e.target.value = ""; if (files?.length) onMediaFiles(files); }} />
+              <input ref={vidRef} type="file" accept="video/*" hidden onChange={(e) => { const files = e.target.files; e.target.value = ""; if (files?.length) onMediaFiles(files); }} />
             </div>
           )}
         </section>
@@ -820,6 +913,44 @@ function Console() {
 .wa-sheet button:active{background:#f0f0f0}
 .wa-sheet button.cancel{color:#e74c3c;font-weight:600;border-top:1px solid #eee;margin-top:4px;justify-content:center}
 .wa-sheet button i{width:20px;text-align:center;font-size:15px;color:#666}`}</style>
+      {composer && (
+        <MediaComposer
+          kind={composer.kind}
+          file={composer.file}
+          sending={!!upload}
+          onCancel={() => { setComposer(null); setMediaQueue([]); }}
+          onSend={(caption) => {
+            const c = composer;
+            const [next, ...rest] = mediaQueue;
+            setComposer(next || null);
+            setMediaQueue(rest);
+            uploadMedia(c.kind, c.file, caption);
+          }}
+        />
+      )}
+      {saveOpen && selUser && (
+        <div className="ag-overlay" onClick={() => setSaveOpen(false)}>
+          <div className="ag-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="ag-head"><strong>Save contact</strong><button onClick={() => setSaveOpen(false)}><i className="fas fa-times" /></button></div>
+            <div className="sc-body">
+              <img className="sc-av" src={avatarFor(selUser.username)} alt="" />
+              <input
+                className="sc-name"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                maxLength={80}
+                placeholder="Contact name"
+                autoFocus
+                onKeyDown={(e) => e.key === "Enter" && saveContact()}
+              />
+              <div className="sc-num">+{selUser.cc || "977"} {selUser.mobile}</div>
+              <button className="ag-add" onClick={saveContact} disabled={savingContact || !saveName.trim()}>
+                {savingContact ? "Saving…" : "Save contact"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {viewer && <ImageViewer src={viewer.src} caption={viewer.caption} onClose={() => setViewer(null)} />}
       {agentsOpen && <AgentsPanel onClose={() => setAgentsOpen(false)} />}
       {toast && <div key={toast.id} className={`wa-toast ${toast.kind}`}>{toast.msg}</div>}

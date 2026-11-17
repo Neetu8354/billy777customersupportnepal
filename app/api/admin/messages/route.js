@@ -35,7 +35,7 @@ export async function GET(req) {
     success: true,
     messages,
     user: {
-      id: user.id, mobile: user.mobile, username: user.username,
+      id: user.id, mobile: user.mobile, cc: user.cc, username: user.username,
       display_name: user.display_name, blocked: !!user.blocked,
       online, last_seen: user.last_seen,
     },

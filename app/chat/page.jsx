@@ -8,6 +8,7 @@ import { CALL_CSS, CallOverlay, useVoiceCall } from "@/components/CallUI";
 import {
   Tick, MsgText, StickerMsg, VoicePlayer, CallEventRow,
   EmojiGrid, StickerPicker, MediaComposer, Sheet, ImageViewer,
+  useFileDrop, DropOverlay, splitMedia,
 } from "@/components/ChatBits";
 import {
   api, fmtTime, fmtDay, fmtAgo, sfx, isSticker, callInfo, avatarFor,
@@ -186,6 +187,7 @@ export default function ChatPage() {
   const [menuFor, setMenuFor] = useState(null);
   const [toast, setToast] = useState(null);
   const [composer, setComposer] = useState(null); // {kind:'image'|'video', file}
+  const [mediaQueue, setMediaQueue] = useState([]); // [{kind, file}] pending composers
   const [rec, setRec] = useState(null); // {secs}
   const [upload, setUpload] = useState(null); // {label, pct}
   const [gone, setGone] = useState(false);
@@ -446,12 +448,18 @@ export default function ChatPage() {
     xhr.send(fd);
   };
 
-  const pickFile = (kind, file) => {
-    if (!file) return;
-    const limit = kind === "image" ? 5 * 1024 * 1024 : 50 * 1024 * 1024;
-    if (file.size > limit) return showToast(kind === "image" ? "Image > 5MB" : "Video > 50MB", "error");
-    setComposer({ kind, file });
-  };
+  /* dropped/pasted/picked files — first opens the composer, rest queue up so
+     each gets its own caption; files dropped while a composer is open join the queue */
+  const onMediaFiles = useCallback((files) => {
+    const { items, error } = splitMedia(files);
+    if (error) showToast(error, "error");
+    if (!items.length) return;
+    if (composer) return setMediaQueue((q) => [...q, ...items]);
+    setComposer(items[0]);
+    setMediaQueue((q) => [...q, ...items.slice(1)]);
+  }, [showToast, composer]);
+
+  const { dragging, dropProps } = useFileDrop(onMediaFiles);
 
   /* ---------- voice recording ---------- */
   const toggleRec = async () => {
@@ -638,7 +646,8 @@ export default function ChatPage() {
     <>
       <style>{CSS + CALL_CSS}</style>
       <VisitBeacon />
-      <div className="chat-root">
+      <div className="chat-root" {...dropProps}>
+        {dragging && <DropOverlay />}
         <header className="wa-header">
           <a className="wa-back" href="/social">
             <i className="fas fa-arrow-left" />
@@ -750,6 +759,10 @@ export default function ChatPage() {
                 value={text}
                 onChange={(e) => onType(e.target.value)}
                 placeholder={editing ? "Edit message..." : "Type a message..."}
+                onPaste={(e) => {
+                  const files = e.clipboardData?.files;
+                  if (files?.length) { e.preventDefault(); onMediaFiles(files); }
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -772,18 +785,20 @@ export default function ChatPage() {
           </div>
         )}
 
-        <input ref={imgRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) pickFile("image", f); }} />
-        <input ref={vidRef} type="file" accept="video/*" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) pickFile("video", f); }} />
+        <input ref={imgRef} type="file" accept="image/*" hidden onChange={(e) => { const files = e.target.files; e.target.value = ""; if (files?.length) onMediaFiles(files); }} />
+        <input ref={vidRef} type="file" accept="video/*" hidden onChange={(e) => { const files = e.target.files; e.target.value = ""; if (files?.length) onMediaFiles(files); }} />
 
         {composer && (
           <MediaComposer
             kind={composer.kind}
             file={composer.file}
             sending={!!upload}
-            onCancel={() => setComposer(null)}
+            onCancel={() => { setComposer(null); setMediaQueue([]); }}
             onSend={(caption) => {
               const c = composer;
-              setComposer(null);
+              const [next, ...rest] = mediaQueue;
+              setComposer(next || null);
+              setMediaQueue(rest);
               uploadMedia(c.kind, c.file, caption);
             }}
           />

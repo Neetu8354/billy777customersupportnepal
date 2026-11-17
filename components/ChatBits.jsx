@@ -205,6 +205,90 @@ export function StickerPicker({ onPick }) {
   );
 }
 
+/* ---------- drag & drop / paste media ---------- */
+export const MEDIA_LIMITS = { image: 5 * 1024 * 1024, video: 50 * 1024 * 1024 };
+
+/* FileList -> { items:[{kind,file}], error } — skips non image/video and
+   oversize files, collecting a ready-to-show error string */
+export function splitMedia(files) {
+  const items = [];
+  let error = null;
+  for (const f of Array.from(files || [])) {
+    const kind = f.type?.startsWith("image/") ? "image" : f.type?.startsWith("video/") ? "video" : null;
+    if (!kind) { error = "Only images or videos can be sent"; continue; }
+    if (f.size > MEDIA_LIMITS[kind]) { error = kind === "image" ? "Image > 5MB" : "Video > 50MB"; continue; }
+    items.push({ kind, file: f });
+  }
+  return { items, error };
+}
+
+/* spread dropProps on the chat container; depth counter keeps child-element
+   dragenter/leave noise from flickering the overlay */
+export function useFileDrop(onFiles) {
+  const [dragging, setDragging] = useState(false);
+  const depth = useRef(0);
+  const cb = useRef(onFiles);
+  cb.current = onFiles;
+  const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
+
+  /* an outside drop must not navigate the browser away */
+  useEffect(() => {
+    const stop = (e) => e.preventDefault();
+    window.addEventListener("dragover", stop);
+    window.addEventListener("drop", stop);
+    return () => {
+      window.removeEventListener("dragover", stop);
+      window.removeEventListener("drop", stop);
+    };
+  }, []);
+
+  const dropProps = {
+    onDragEnter: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth.current += 1;
+      setDragging(true);
+    },
+    onDragOver: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    },
+    onDragLeave: (e) => {
+      if (!hasFiles(e)) return;
+      depth.current = Math.max(0, depth.current - 1);
+      if (depth.current === 0) setDragging(false);
+    },
+    onDrop: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth.current = 0;
+      setDragging(false);
+      if (e.dataTransfer.files?.length) cb.current(e.dataTransfer.files);
+    },
+  };
+  return { dragging, dropProps };
+}
+
+/* pointer-events:none so drops land on the container under the veil */
+export function DropOverlay() {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 4000, pointerEvents: "none",
+      background: "rgba(8,12,16,.55)", display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div style={{
+        border: "3px dashed #ff6b4a", borderRadius: 20, padding: "34px 44px", textAlign: "center",
+        color: "#fff", background: "rgba(0,0,0,.55)",
+      }}>
+        <i className="fas fa-images" style={{ fontSize: 44, display: "block", marginBottom: 12 }} />
+        <div style={{ fontSize: 18, fontWeight: 700 }}>Drop images or videos to send</div>
+        <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>Preview opens before sending</div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- media composer (preview + caption) ---------- */
 export function MediaComposer({ kind, file, onSend, onCancel, sending }) {
   const [caption, setCaption] = useState("");
